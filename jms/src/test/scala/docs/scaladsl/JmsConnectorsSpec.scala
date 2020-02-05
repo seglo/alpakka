@@ -1269,4 +1269,66 @@ class JmsConnectorsSpec extends JmsSpec {
 
     connection.close()
   }
+
+  "support request/reply with temporary queues #13628" in withConnectionFactory() { connectionFactory =>
+    val connection = connectionFactory.createConnection()
+    connection.start()
+    val session = connection.createSession(false, Session.AUTO_ACKNOWLEDGE)
+    val tempQueue = session.createTemporaryQueue()
+    val tempQueueDest = alpakka.jms.Destination(tempQueue)
+    val message = "ThisIsATest"
+    val correlationId = UUID.randomUUID().toString
+
+    val producerSettings = JmsProducerSettings(system, connectionFactory).withQueue("test")
+
+    val consumer = session.createConsumer(tempQueue)
+
+    val jmsMessage = JmsTextMessage(message)
+      .withHeader(JmsCorrelationId(correlationId))
+      .withHeader(JmsReplyTo(tempQueueDest))
+
+    val toRespondStreamCompletion =
+      Source
+        .single(jmsMessage)
+        .via(JmsProducer.flow(producerSettings))
+        .mapAsync(1) { msg =>
+          Future(consumer.receive(5.seconds.toMillis))(system.dispatcher).map {
+            case response: TextMessage if msg.headers.contains(JmsCorrelationId(response.getJMSCorrelationID)) =>
+              response
+            case _ => throw new Exception("Correlation ID was not found!")
+          }(system.dispatcher)
+        }
+        .runWith(Sink.seq)
+
+    //#request-reply
+    val respondStreamControl: JmsConsumerControl =
+      JmsConsumer(JmsConsumerSettings(system, connectionFactory).withQueue("test"))
+        .collect {
+          case message: TextMessage => JmsTextMessage(message)
+        }
+        .map { textMessage =>
+          textMessage.headers.foldLeft(JmsTextMessage(textMessage.body.reverse)) {
+            case (acc, rt: JmsReplyTo) => acc.to(rt.jmsDestination)
+            case (acc, cId: JmsCorrelationId) => acc.withHeader(cId)
+            case (acc, _) => acc
+          }
+        }
+        .via {
+          JmsProducer.flow(
+            JmsProducerSettings(system, connectionFactory).withQueue("ignored")
+          )
+        }
+        .to(Sink.ignore)
+        .run()
+    //#request-reply
+
+    val msg = toRespondStreamCompletion.futureValue.head.asInstanceOf[TextMessage]
+    msg shouldBe a[TextMessage]
+    msg.getJMSCorrelationID shouldEqual correlationId
+    msg.asInstanceOf[TextMessage].getText shouldEqual message.reverse
+
+    respondStreamControl.shutdown()
+
+    connection.close()
+  }
 }
