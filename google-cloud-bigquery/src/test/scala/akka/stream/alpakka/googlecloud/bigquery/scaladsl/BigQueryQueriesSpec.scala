@@ -5,6 +5,7 @@
 package akka.stream.alpakka.googlecloud.bigquery.scaladsl
 
 import _root_.spray.json._
+import akka.NotUsed
 import akka.actor.ActorSystem
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
 import akka.http.scaladsl.model.headers.OAuth2BearerToken
@@ -18,7 +19,7 @@ import akka.stream.alpakka.googlecloud.bigquery.{
   BigQuerySettings,
   HoverflySupport
 }
-import akka.stream.scaladsl.Sink
+import akka.stream.scaladsl.{Sink, Source}
 import akka.testkit.TestKit
 import io.specto.hoverfly.junit.core.SimulationSource.dsl
 import io.specto.hoverfly.junit.dsl.HoverflyDsl.service
@@ -27,7 +28,7 @@ import org.scalatest.BeforeAndAfterAll
 import org.scalatest.matchers.should.Matchers
 import org.scalatest.wordspec.AsyncWordSpecLike
 
-import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future}
 
 class BigQueryQueriesSpec
     extends TestKit(ActorSystem("BigQueryQueriesSpec"))
@@ -196,6 +197,26 @@ class BigQueryQueriesSpec
             .addAttributes(BigQueryAttributes.settings(settings))
             .runWith(Sink.seq[JsValue])
         }
+      }
+
+      "failed future for comprehension" in {
+        import scala.concurrent.duration._
+
+        def fail: Future[String] = Future(throw new Exception("error"))
+
+        val source: Source[String, Future[NotUsed]] = Source.lazyFutureSource { () =>
+          for {
+            r1 <- Future.successful("f1")
+            r2 <- fail
+          } yield Source(List(r1, r2))
+        }
+
+        val f = source.runWith(Sink.collection)
+
+        val strs = Await.result(f, 10.seconds)
+
+        println(strs)
+        succeed
       }
     }
 
